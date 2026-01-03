@@ -35,24 +35,26 @@ const generateTimetable = async (departmentId, sectionId) => {
     console.log(`⏰ Working hours: ${settings?.workingHours?.startTime} - ${settings?.workingHours?.endTime}`);
     console.log(`⏱️ Period duration: ${settings?.periodDuration} minutes`);
 
-    // ✅ CRITICAL FIX: Fetch faculty using the correct department ID
+    // 🌟 THE FIX: Fetch faculty using BOTH department ID AND section ID
+    // We only want faculty entries that are assigned to THIS specific section.
     const facultyList = await Faculty.find({ 
-      department: deptId  // Just use the string ID directly
+      department: deptId,
+      section: sectionId // 🚨 ADDED SECTION FILTER 
     })
       .populate('subject')
       .populate('department');
 
-    console.log(`👥 Found ${facultyList.length} faculty members`);
+    console.log(`👥 Found ${facultyList.length} faculty assignments for Section ${sectionId}`);
     
     if (facultyList.length > 0) {
       console.log('Faculty list:');
       facultyList.forEach(f => {
-        console.log(`  - ${f.name} (${f.subject?.name}) - Dept: ${f.department?.name}`);
+        console.log(`  - ${f.name} (${f.subject?.name}) - Dept: ${f.department?.name}`);
       });
     }
 
     if (facultyList.length === 0) {
-      console.log('❌ No faculty found for this department');
+      console.log('❌ No faculty found for this section');
       return null;
     }
 
@@ -89,16 +91,19 @@ const generateTimetable = async (departmentId, sectionId) => {
           // Pick the least used faculty
           const selectedFaculty = availableFaculty[0];
           
-          timetable[day][period] = {
-            facultyId: selectedFaculty._id,
-            facultyName: selectedFaculty.name,
-            subjectId: selectedFaculty.subject._id,
-            subjectName: selectedFaculty.subject.name,
-            subjectCode: selectedFaculty.subject.code
-          };
+          // CRITICAL: Ensure the slot is only filled once
+          if (timetable[day][period] === null) {
+              timetable[day][period] = {
+                  facultyId: selectedFaculty._id,
+                  facultyName: selectedFaculty.name,
+                  subjectId: selectedFaculty.subject._id,
+                  subjectName: selectedFaculty.subject.name,
+                  subjectCode: selectedFaculty.subject.code
+              };
 
-          // Increment usage
-          facultyUsage[selectedFaculty._id.toString()]++;
+              // Increment usage
+              facultyUsage[selectedFaculty._id.toString()]++;
+          }
         }
       });
     });
