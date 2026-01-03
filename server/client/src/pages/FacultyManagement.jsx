@@ -11,16 +11,16 @@ const FacultyManagement = () => {
   const [sections, setSections] = useState([]);
   const [settings, setSettings] = useState(null);
   const [periods, setPeriods] = useState([1, 2, 3, 4, 5]);
+  const [conflictSlots, setConflictSlots] = useState({}); // ✅ NEW: Track blocked slots
   const [formData, setFormData] = useState({
     name: '',
     subject: '',
     department: '',
-    selectedSections: [],
+    section: '',
     availability: []
   });
   const [editingId, setEditingId] = useState(null);
   const [selectedSlots, setSelectedSlots] = useState({});
-  const [blockedSlots, setBlockedSlots] = useState({});
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -29,14 +29,14 @@ const FacultyManagement = () => {
     fetchSettings();
   }, []);
 
+  // ✅ NEW: Recalculate conflicts whenever faculty name or section changes
   useEffect(() => {
-    // Recalculate blocked slots whenever sections are selected
-    if (formData.selectedSections.length > 0) {
-      calculateBlockedSlots();
+    if (formData.name && formData.section) {
+      checkForConflicts();
     } else {
-      setBlockedSlots({});
+      setConflictSlots({});
     }
-  }, [formData.selectedSections, facultyList, editingId]);
+  }, [formData.name, formData.section, facultyList]);
 
   const fetchSettings = async () => {
     try {
@@ -92,12 +92,9 @@ const FacultyManagement = () => {
       const data = await response.json();
       
       if (data.success) {
-        // Filter out 1st year sections (those with cycles)
-        const filteredSections = data.data.filter(section => !section.cycle);
-        setSections(filteredSections);
-        console.log(`✅ Loaded ${filteredSections.length} sections (2nd-4th year) for department`);
+        setSections(data.data);
+        console.log(`✅ Loaded ${data.data.length} sections for department`);
       } else {
-        console.error('❌ Failed to fetch sections');
         setSections([]);
       }
     } catch (error) {
@@ -106,49 +103,67 @@ const FacultyManagement = () => {
     }
   };
 
-  const calculateBlockedSlots = () => {
-    const blocked = {};
-    
-    // Get all other faculty members (exclude current editing faculty)
-    const otherFaculty = facultyList.filter(f => f._id !== editingId);
-    
-    // For each selected section, find which slots are already occupied
-    formData.selectedSections.forEach(selectedSectionId => {
-      otherFaculty.forEach(faculty => {
-        // Check if this faculty teaches any of our selected sections
-        const teachesThisSection = faculty.sections?.some(
-          section => section._id === selectedSectionId
-        );
-        
-        if (teachesThisSection && faculty.availability) {
-          // Block all slots where this faculty is available for this section
-          faculty.availability.forEach(avail => {
-            avail.periods.forEach(period => {
-              const key = `${avail.day}-${period}`;
-              if (!blocked[key]) {
-                blocked[key] = [];
-              }
-              
-              const sectionCode = faculty.sections.find(s => s._id === selectedSectionId)?.code;
-              blocked[key].push({
-                facultyName: faculty.name,
-                subject: faculty.subject?.code || 'N/A',
-                sectionCode: sectionCode
+  // ✅ NEW: Check for conflicts and mark slots
+  const checkForConflicts = () => {
+    const conflicts = {};
+    const currentFacultyName = formData.name.trim().toLowerCase();
+    const currentSection = formData.section;
+
+    if (!currentFacultyName || !currentSection) {
+      setConflictSlots({});
+      return;
+    }
+
+    facultyList.forEach(faculty => {
+      // Skip if this is the same faculty being edited
+      if (editingId && faculty._id === editingId) {
+        return;
+      }
+
+      const facultyName = faculty.name.trim().toLowerCase();
+      const facultySection = faculty.section?._id;
+
+      // Check for conflicts:
+      // 1. Same faculty name teaching different section at same time
+      // 2. Different faculty teaching same section at same time
+      if (facultyName === currentFacultyName || facultySection === currentSection) {
+        faculty.availability.forEach(avail => {
+          avail.periods.forEach(period => {
+            const key = `${avail.day}-${period}`;
+            
+            if (!conflicts[key]) {
+              conflicts[key] = [];
+            }
+
+            if (facultyName === currentFacultyName) {
+              conflicts[key].push({
+                type: 'same-faculty',
+                faculty: faculty.name,
+                section: faculty.section?.code || 'N/A'
               });
-            });
+            }
+            
+            if (facultySection === currentSection && facultyName !== currentFacultyName) {
+              conflicts[key].push({
+                type: 'same-section',
+                faculty: faculty.name,
+                section: faculty.section?.code || 'N/A'
+              });
+            }
           });
-        }
-      });
+        });
+      }
     });
-    
-    setBlockedSlots(blocked);
-    console.log('🚫 Blocked slots:', Object.keys(blocked).length);
+
+    setConflictSlots(conflicts);
+    console.log('🚫 Conflict slots:', conflicts);
   };
 
   const handleSubjectChange = (selected) => {
     if (!selected) {
-      setFormData({ ...formData, subject: '', department: '', selectedSections: [] });
+      setFormData({ ...formData, subject: '', department: '', section: '' });
       setSections([]);
+      setConflictSlots({});
       return;
     }
 
@@ -165,39 +180,31 @@ const FacultyManagement = () => {
       ...formData,
       subject: subjectCode,
       department: selectedSubject.department._id,
-      selectedSections: []
+      section: ''
     });
 
     fetchSectionsByDepartment(selectedSubject.department._id);
     console.log('✅ Selected subject:', subjectCode, '| Department:', selectedSubject.department.name);
   };
 
-  const handleSectionToggle = (sectionId) => {
-    setFormData(prev => {
-      const isSelected = prev.selectedSections.includes(sectionId);
-      return {
-        ...prev,
-        selectedSections: isSelected
-          ? prev.selectedSections.filter(id => id !== sectionId)
-          : [...prev.selectedSections, sectionId]
-      };
-    });
-  };
-
   const handleSlotClick = (day, period) => {
     const key = `${day}-${period}`;
     
-    // Don't allow selecting blocked slots
-    if (blockedSlots[key]) {
-      const conflicts = blockedSlots[key];
-      const conflictInfo = conflicts.map(c => 
-        `${c.facultyName} (${c.subject}) - Section ${c.sectionCode}`
-      ).join('\n');
-      
-      alert(`⚠️ This slot is already occupied:\n\n${conflictInfo}\n\nPlease choose a different time slot.`);
+    // ✅ Check if slot is blocked due to conflict
+    if (conflictSlots[key]) {
+      // Show tooltip or alert explaining why it's blocked
+      const conflicts = conflictSlots[key];
+      const messages = conflicts.map(c => {
+        if (c.type === 'same-faculty') {
+          return `${c.faculty} is already teaching section ${c.section}`;
+        } else {
+          return `${c.faculty} is already teaching this section`;
+        }
+      });
+      alert(`⚠️ This slot is blocked:\n\n${messages.join('\n')}`);
       return;
     }
-    
+
     setSelectedSlots(prev => ({
       ...prev,
       [key]: !prev[key]
@@ -237,8 +244,8 @@ const FacultyManagement = () => {
       return;
     }
 
-    if (formData.selectedSections.length === 0) {
-      alert('❌ Please select at least one section');
+    if (!formData.section) {
+      alert('❌ Please select a section');
       return;
     }
 
@@ -259,7 +266,7 @@ const FacultyManagement = () => {
     const payload = {
       name: formData.name,
       subjectCode: formData.subject,
-      sections: formData.selectedSections,
+      section: formData.section,
       availability
     };
 
@@ -309,7 +316,7 @@ const FacultyManagement = () => {
       name: faculty.name,
       subject: subjectCode,
       department: faculty.subject?.department?._id || '',
-      selectedSections: faculty.sections ? faculty.sections.map(s => s._id) : [],
+      section: faculty.section?._id || '',
       availability: faculty.availability
     });
     
@@ -362,13 +369,13 @@ const FacultyManagement = () => {
       name: '',
       subject: '',
       department: '',
-      selectedSections: [],
+      section: '',
       availability: []
     });
     setSelectedSlots({});
-    setBlockedSlots({});
     setEditingId(null);
     setSections([]);
+    setConflictSlots({});
   };
 
   const getSelectedSubjectDepartment = () => {
@@ -384,34 +391,10 @@ const FacultyManagement = () => {
     })),
   }));
 
-  const getSlotStyle = (day, period) => {
-    const key = `${day}-${period}`;
-    const isSelected = selectedSlots[key];
-    const isBlocked = blockedSlots[key];
-    
-    if (isBlocked) {
-      return {
-        backgroundColor: '#ffcccc',
-        color: '#cc0000',
-        cursor: 'not-allowed',
-        opacity: 0.7
-      };
-    }
-    
-    if (isSelected) {
-      return {
-        backgroundColor: '#007bff',
-        color: '#fff',
-        cursor: 'pointer'
-      };
-    }
-    
-    return {
-      backgroundColor: '#fff',
-      color: '#333',
-      cursor: 'pointer'
-    };
-  };
+  const sectionOptions = sections.map(section => ({
+    value: section._id,
+    label: `${section.code} - ${section.academicYear}`
+  }));
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f5f5f5' }}>
@@ -435,22 +418,6 @@ const FacultyManagement = () => {
             <strong>📊 Current Settings:</strong> {periods.length} periods configured 
             ({settings.workingHours.startTime} - {settings.workingHours.endTime}, 
             {settings.periodDuration} min per period)
-          </div>
-        )}
-
-        {Object.keys(blockedSlots).length > 0 && (
-          <div style={{
-            backgroundColor: '#fff3cd',
-            border: '1px solid #ffc107',
-            borderRadius: '8px',
-            padding: '16px',
-            marginBottom: '24px',
-            fontSize: '14px',
-            color: '#856404'
-          }}>
-            <strong>⚠️ Slot Conflict Warning:</strong> {Object.keys(blockedSlots).length} time slot(s) 
-            are already occupied by other faculty for the selected sections. 
-            Blocked slots are shown in red and cannot be selected.
           </div>
         )}
 
@@ -509,11 +476,6 @@ const FacultyManagement = () => {
                       border: '1px solid #ddd',
                       borderRadius: '4px',
                     }),
-                    menuList: (base) => ({
-                      ...base,
-                      maxHeight: '220px',
-                      overflowY: 'auto',
-                    }),
                   }}
                 />
               </div>
@@ -540,103 +502,51 @@ const FacultyManagement = () => {
               </div>
             </div>
 
-            {sections.length > 0 && (
-              <div style={{ marginTop: '20px', marginBottom: '20px' }}>
-                <label style={{ 
-                  display: 'block', 
-                  marginBottom: '12px', 
-                  fontSize: '14px', 
-                  color: '#555',
-                  fontWeight: '600'
-                }}>
-                  Sections (Select one or more) * - {sections.length} available (2nd-4th Year only)
-                </label>
-                
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-                  gap: '12px'
-                }}>
-                  {sections.map((section) => {
-                    const isSelected = formData.selectedSections.includes(section._id);
-                    return (
-                      <div
-                        key={section._id}
-                        onClick={() => handleSectionToggle(section._id)}
-                        style={{
-                          padding: '12px',
-                          border: `2px solid ${isSelected ? '#007bff' : '#ddd'}`,
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          backgroundColor: isSelected ? '#e7f3ff' : '#fff',
-                          textAlign: 'center',
-                          transition: 'all 0.2s',
-                          userSelect: 'none'
-                        }}
-                      >
-                        <div style={{ 
-                          fontWeight: '600', 
-                          color: isSelected ? '#007bff' : '#333',
-                          marginBottom: '4px'
-                        }}>
-                          {section.code}
-                        </div>
-                        <div style={{ 
-                          fontSize: '12px', 
-                          color: isSelected ? '#0056b3' : '#666'
-                        }}>
-                          {section.academicYear}
-                        </div>
-                        {isSelected && (
-                          <div style={{
-                            marginTop: '6px',
-                            color: '#007bff',
-                            fontSize: '16px'
-                          }}>
-                            ✓
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                
-                {formData.selectedSections.length > 0 && (
-                  <div style={{
-                    marginTop: '12px',
-                    padding: '10px',
-                    backgroundColor: '#e7f3ff',
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', color: '#555', fontWeight: '500' }}>
+                Section *
+              </label>
+              <Select
+                options={sectionOptions}
+                placeholder="Select section..."
+                value={sectionOptions.find(opt => opt.value === formData.section) || null}
+                onChange={(selected) => setFormData({ ...formData, section: selected ? selected.value : '' })}
+                isDisabled={!formData.department || sections.length === 0}
+                styles={{
+                  control: (base) => ({
+                    ...base,
+                    minHeight: '42px',
+                    fontSize: '14px',
+                    border: '1px solid #ddd',
                     borderRadius: '4px',
-                    fontSize: '13px',
-                    color: '#004085'
-                  }}>
-                    ✓ Selected {formData.selectedSections.length} section(s)
-                  </div>
-                )}
-              </div>
-            )}
+                  }),
+                }}
+              />
+              {sections.length === 0 && formData.department && (
+                <p style={{ marginTop: '8px', fontSize: '13px', color: '#dc3545' }}>
+                  ⚠️ No sections found. Please run: node seed/seedSections.js
+                </p>
+              )}
+            </div>
 
-            {sections.length === 0 && formData.department && (
+            {/* ✅ CONFLICT LEGEND */}
+            {Object.keys(conflictSlots).length > 0 && (
               <div style={{
-                marginBottom: '20px',
+                marginBottom: '16px',
                 padding: '12px',
                 backgroundColor: '#fff3cd',
-                borderRadius: '4px',
-                fontSize: '14px',
+                border: '1px solid #ffc107',
+                borderRadius: '6px',
+                fontSize: '13px',
                 color: '#856404'
               }}>
-                ⚠️ No sections found for this department. Please run: <code>node seed/seedSections.js</code>
+                <strong>⚠️ Blocked slots (in red):</strong> Already occupied by this faculty or another faculty in this section
               </div>
             )}
 
             <div style={{ marginBottom: '20px' }}>
               <label style={{ display: 'block', marginBottom: '12px', fontSize: '14px', color: '#555', fontWeight: '600' }}>
-                Availability (Click to select periods) * 
-                {Object.keys(blockedSlots).length > 0 && (
-                  <span style={{ color: '#dc3545', marginLeft: '8px' }}>
-                    - Red slots are already occupied
-                  </span>
-                )}
+                Availability (Click to select periods) *
               </label>
               
               <div style={{ overflowX: 'auto' }}>
@@ -685,24 +595,35 @@ const FacultyManagement = () => {
                         {periods.map(period => {
                           const key = `${day}-${period}`;
                           const isSelected = selectedSlots[key];
-                          const isBlocked = blockedSlots[key];
-                          const cellStyle = getSlotStyle(day, period);
+                          const isBlocked = conflictSlots[key];
                           
                           return (
                             <td 
                               key={period}
                               onClick={() => handleSlotClick(day, period)}
-                              title={isBlocked ? `Occupied by: ${blockedSlots[key].map(c => c.facultyName).join(', ')}` : ''}
+                              title={isBlocked ? '🚫 Blocked - Slot already occupied' : isSelected ? 'Click to deselect' : 'Click to select'}
                               style={{ 
                                 padding: '12px', 
                                 border: '1px solid #ddd',
                                 textAlign: 'center',
+                                cursor: isBlocked ? 'not-allowed' : 'pointer',
+                                backgroundColor: isBlocked 
+                                  ? '#ffcccc' // Light red for blocked
+                                  : isSelected 
+                                    ? '#007bff' // Blue for selected
+                                    : '#fff', // White for available
+                                color: isBlocked 
+                                  ? '#cc0000' // Dark red text
+                                  : isSelected 
+                                    ? '#fff' // White text
+                                    : '#333',
                                 transition: 'background-color 0.2s',
                                 userSelect: 'none',
-                                ...cellStyle
+                                position: 'relative'
                               }}
                             >
-                              {isBlocked ? '🚫' : isSelected ? '✓' : ''}
+                              {isBlocked && '🚫'}
+                              {isSelected && !isBlocked && '✓'}
                             </td>
                           );
                         })}
@@ -710,6 +631,46 @@ const FacultyManagement = () => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+              
+              {/* ✅ LEGEND */}
+              <div style={{ 
+                marginTop: '12px', 
+                display: 'flex', 
+                gap: '24px', 
+                fontSize: '13px',
+                color: '#666'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ 
+                    width: '20px', 
+                    height: '20px', 
+                    backgroundColor: '#007bff',
+                    border: '1px solid #ddd',
+                    borderRadius: '3px'
+                  }}></div>
+                  <span>Selected</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ 
+                    width: '20px', 
+                    height: '20px', 
+                    backgroundColor: '#ffcccc',
+                    border: '1px solid #ddd',
+                    borderRadius: '3px'
+                  }}></div>
+                  <span>Blocked (Conflict)</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ 
+                    width: '20px', 
+                    height: '20px', 
+                    backgroundColor: '#fff',
+                    border: '1px solid #ddd',
+                    borderRadius: '3px'
+                  }}></div>
+                  <span>Available</span>
+                </div>
               </div>
             </div>
 
@@ -782,7 +743,7 @@ const FacultyManagement = () => {
                       Department
                     </th>
                     <th style={{ textAlign: 'left', padding: '12px', fontSize: '14px', fontWeight: '600', color: '#555' }}>
-                      Sections
+                      Section
                     </th>
                     <th style={{ textAlign: 'left', padding: '12px', fontSize: '14px', fontWeight: '600', color: '#555' }}>
                       Actions
@@ -795,16 +756,14 @@ const FacultyManagement = () => {
                       <td style={{ padding: '12px', fontSize: '14px', color: '#333' }}>
                         {faculty.name}
                       </td>
-                      <td style={{ padding: '12px', fontSize: '14px', color: '# 333' }}>
+                      <td style={{ padding: '12px', fontSize: '14px', color: '#333' }}>
                         {faculty.subject?.name || 'N/A'}
                       </td>
                       <td style={{ padding: '12px', fontSize: '14px', color: '#333' }}>
                         {faculty.subject?.department?.name || faculty.department?.name || 'N/A'}
                       </td>
                       <td style={{ padding: '12px', fontSize: '13px', color: '#666' }}>
-                        {faculty.sections && faculty.sections.length > 0
-                          ? faculty.sections.map(s => s.code).join(', ')
-                          : 'No sections'}
+                        {faculty.section?.code || 'N/A'}
                       </td>
                       <td style={{ padding: '12px' }}>
                         <button
